@@ -1,0 +1,175 @@
+// Poseidon2哈希算法Circom电路实现
+// 参数: (n,t,d) = (256,3,5)
+// 公开输入: 哈希结果
+// 私有输入: 哈希原象(一个block)
+
+include "circomlib/circuits/poseidon.circom";
+include "circomlib/circuits/utils.circom";
+
+// 根据Poseidon2论文Table 1，(256,3,5)参数配置
+// 轮数配置: 全轮数=8, 半轮数=4, 部分轮数=34
+template Poseidon2Params() {
+    signal input state[3];
+    signal output out[3];
+    
+    // 常量参数 - 来自Poseidon2论文
+    const ROUNDS_F = 8;      // 全轮数
+    const ROUNDS_P = 34;     // 部分轮数
+    const t = 3;             // 状态大小
+    const d = 5;             // S-box次数
+    
+    // 轮常量 (简化版，实际实现需要使用完整常量集)
+    // 注意: 实际应用中需要从官方规范获取完整的轮常量
+    const C[ROUNDS_F + ROUNDS_P][t] = [
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        // 部分轮常量 (仅示例，实际需替换)
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0], [0, 0, 0], [0, 0, 0],
+        [0, 0, 0], [0, 0, 0]
+    ];
+    
+    // 线性层矩阵 (简化版)
+    const M[t][t] = [
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1]
+    ];
+    
+    // 初始化状态
+    var s[3];
+    for (var i = 0; i < t; i++) {
+        s[i] = state[i];
+    }
+    
+    var r;
+    // 前4轮全轮
+    for (r = 0; r < ROUNDS_F/2; r++) {
+        // 添加轮常量
+        for (var i = 0; i < t; i++) {
+            s[i] += C[r][i];
+            s[i] = s[i] % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+        }
+        
+        // 应用S-box到所有元素 (全轮)
+        for (var i = 0; i < t; i++) {
+            s[i] = Pow5(s[i]);
+        }
+        
+        // 线性层
+        var new_s[t];
+        for (var i = 0; i < t; i++) {
+            new_s[i] = 0;
+            for (var j = 0; j < t; j++) {
+                new_s[i] += M[i][j] * s[j];
+                new_s[i] = new_s[i] % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+            }
+        }
+        
+        // 更新状态
+        for (var i = 0; i < t; i++) {
+            s[i] = new_s[i];
+        }
+    }
+    
+    // 部分轮
+    for (r = ROUNDS_F/2; r < ROUNDS_F/2 + ROUNDS_P; r++) {
+        // 添加轮常量
+        for (var i = 0; i < t; i++) {
+            s[i] += C[r][i];
+            s[i] = s[i] % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+        }
+        
+        // 应用S-box到第一个元素 (部分轮)
+        s[0] = Pow5(s[0]);
+        
+        // 线性层
+        var new_s[t];
+        for (var i = 0; i < t; i++) {
+            new_s[i] = 0;
+            for (var j = 0; j < t; j++) {
+                new_s[i] += M[i][j] * s[j];
+                new_s[i] = new_s[i] % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+            }
+        }
+        
+        // 更新状态
+        for (var i = 0; i < t; i++) {
+            s[i] = new_s[i];
+        }
+    }
+    
+    // 后4轮全轮
+    for (r = ROUNDS_F/2 + ROUNDS_P; r < ROUNDS_F + ROUNDS_P; r++) {
+        // 添加轮常量
+        for (var i = 0; i < t; i++) {
+            s[i] += C[r][i];
+            s[i] = s[i] % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+        }
+        
+        // 应用S-box到所有元素 (全轮)
+        for (var i = 0; i < t; i++) {
+            s[i] = Pow5(s[i]);
+        }
+        
+        // 线性层
+        var new_s[t];
+        for (var i = 0; i < t; i++) {
+            new_s[i] = 0;
+            for (var j = 0; j < t; j++) {
+                new_s[i] += M[i][j] * s[j];
+                new_s[i] = new_s[i] % 21888242871839275222246405745257275088548364400416034343698204186575808495617;
+            }
+        }
+        
+        // 更新状态
+        for (var i = 0; i < t; i++) {
+            s[i] = new_s[i];
+        }
+    }
+    
+    // 输出最终状态
+    for (var i = 0; i < t; i++) {
+        out[i] = s[i];
+    }
+}
+
+// 5次幂S-box实现
+function Pow5(a) {
+    var res = a * a;
+    res = res * a;  // a^3
+    res = res * a;  // a^4
+    res = res * a;  // a^5
+    return res;
+}
+
+// Poseidon2哈希函数
+template Poseidon2Hash() {
+    signal private input preimage[2];  // 原象，t=3时rate=2
+    signal public output hash[1];      // 哈希结果，取状态的第一个元素作为输出
+    
+    // 初始化状态: [0, preimage[0], preimage[1]]
+    signal state[3];
+    state[0] = 0;
+    state[1] = preimage[0];
+    state[2] = preimage[1];
+    
+    // 应用Poseidon2置换
+    component perm = Poseidon2Params();
+    for (var i = 0; i < 3; i++) {
+        perm.state[i] <== state[i];
+    }
+    
+    // 输出哈希结果
+    hash[0] <== perm.out[0];
+}
+
+// 主电路: 验证哈希值与原象匹配
+component main { public [hash] } = Poseidon2Hash();
