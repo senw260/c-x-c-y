@@ -1,0 +1,283 @@
+import os
+import hashlib
+from typing import Tuple, Optional
+
+# ----------------------------
+# SM2推荐曲线参数 (GM/T 0003-2012)
+# ----------------------------
+p = 0xFFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000FFFFFFFFFFFFFFFF
+a = 0xFFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF00000000FFFFFFFFFFFFFFFC
+b = 0x28E9FA9E9D9F5E344D5A9E4BCF6509A7F39789F515AB8F92DDBCBD414D940E93
+n = 0xFFFFFFFEFFFFFFFFFFFFFFFFFFFFFFFF7203DF6B21C6052B53BBF40939D54123
+x_G = 0x32C4AE2C1F1981195F9904466A39C9948FE30BBFF2660BE1715A4589334C74C7
+y_G = 0xBC3736A2F4F6779C59BDCEE36B692153D0A9877CC62A474002DF32E52139F0A0
+
+
+# ----------------------------
+# 椭圆曲线点类与基础运算
+# ----------------------------
+class Point:
+    def __init__(self, x: int, y: int, is_inf: bool = False):
+        self.x = x
+        self.y = y
+        self.is_inf = is_inf  # 标记是否为无穷远点
+
+    def __eq__(self, other) -> bool:
+        if self.is_inf:
+            return other.is_inf
+        return self.x == other.x and self.y == other.y
+
+    def __repr__(self) -> str:
+        if self.is_inf:
+            return "Point(inf)"
+        return f"Point(0x{self.x:064x}, 0x{self.y:064x})"
+
+
+# 预定义点
+INF = Point(0, 0, True)  # 无穷远点
+G = Point(x_G, y_G)      # 基点
+
+
+# ----------------------------
+# 基础数学运算
+# ----------------------------
+def mod_inverse(a: int, mod: int) -> int:
+    """使用费马小定理计算模逆 (a^(mod-2) mod mod)"""
+    return pow(a, mod - 2, mod)
+
+
+def point_add(p1: Point, p2: Point) -> Point:
+    """椭圆曲线点加法"""
+    if p1.is_inf:
+        return p2
+    if p2.is_inf:
+        return p1
+    if p1.x == p2.x and (p1.y != p2.y or p1.y == 0):
+        return INF  # 互为逆元
+    
+    # 计算斜率k
+    if p1 != p2:
+        # 不同点加法
+        dx = (p2.x - p1.x) % p
+        dy = (p2.y - p1.y) % p
+        k = (dy * mod_inverse(dx, p)) % p
+    else:
+        # 同点双倍
+        k = ((3 * p1.x * p1.x + a) * mod_inverse(2 * p1.y, p)) % p
+    
+    # 计算新点坐标
+    x3 = (k * k - p1.x - p2.x) % p
+    y3 = (k * (p1.x - x3) - p1.y) % p
+    return Point(x3, y3)
+
+
+# ----------------------------
+# 标量乘法优化 (NAF算法)
+# ----------------------------
+def naf_representation(k: int) -> list:
+    """将整数k转换为非相邻形式(NAF)，减少点加法次数"""
+    naf = []
+    while k > 0:
+        if k % 2 == 1:
+            sign = 2 - (k % 4)
+            naf.append(sign)
+            k -= sign
+        else:
+            naf.append(0)
+        k = k // 2
+    return naf
+
+
+def point_mul(k: int, p: Point) -> Point:
+    """使用NAF优化的标量乘法 (k * p)"""
+    if k == 0:
+        return INF
+    naf = naf_representation(k)
+    result = INF
+    current = p
+    
+    for digit in naf:
+        if digit == 1:
+            result = point_add(result, current)
+        elif digit == -1:
+            # 加上当前点的逆元 (x, -y mod p)
+            inv_current = Point(current.x, (-current.y) % p)
+            result = point_add(result, inv_current)
+        # 双倍当前点
+        current = point_add(current, current)
+    return result
+
+
+# ----------------------------
+# SM3哈希函数 (适配SM2)
+# ----------------------------
+def sm3_hash(data: bytes) -> bytes:
+    """SM3哈希函数，返回256位哈希值"""
+    # 注意：实际使用需确保环境支持SM3，部分Python版本可能需要额外库
+    try:
+        return hashlib.new('sm3', data).digest()
+    except ValueError:
+        # 若不支持SM3，可替换为自定义实现（此处仅作占位）
+        raise NotImplementedError("请使用支持SM3的Python环境或实现SM3哈希函数")
+
+
+# ----------------------------
+# 密钥生成
+# ----------------------------
+def generate_key_pair() -> Tuple[int, Point]:
+    """生成SM2密钥对：(私钥d, 公钥Q=d*G)"""
+    # 生成1 < d < n的随机私钥
+    while True:
+        d = int.from_bytes(os.urandom(32), byteorder='big')
+        if 1 < d < n:
+            break
+    # 计算公钥Q = d * G
+    Q = point_mul(d, G)
+    return d, Q
+
+
+# ----------------------------
+# 签名与验证
+# ----------------------------
+def sign(d: int, message: bytes) -> Tuple[int, int]:
+    """SM2数字签名：使用私钥d对消息签名"""
+    e = int.from_bytes(sm3_hash(message), byteorder='big')  # 消息哈希
+    
+    while True:
+        # 生成随机数k (1 < k < n)
+        while True:
+            k = int.from_bytes(os.urandom(32), byteorder='big')
+            if 1 < k < n:
+                break
+        
+        kG = point_mul(k, G)  # k*G
+        r = (e + kG.x) % n    # 计算r
+        
+        # 检查r有效性
+        if r == 0 or (r + k) % n == 0:
+            continue
+        
+        # 计算s = (k^-1 * (1 + d)^-1 * (r - d*k)) mod n
+        inv_k = mod_inverse(k, n)
+        inv_1d = mod_inverse((1 + d) % n, n)
+        s = (inv_k * inv_1d * (r - d * k)) % n
+        
+        if s != 0:
+            return (r, s)
+
+
+def verify(Q: Point, message: bytes, signature: Tuple[int, int]) -> bool:
+    """SM2签名验证：使用公钥Q验证签名"""
+    r, s = signature
+    
+    # 验证参数范围
+    if not (1 <= r < n and 1 <= s < n):
+        return False
+    
+    e = int.from_bytes(sm3_hash(message), byteorder='big')
+    t = (r + s) % n
+    
+    if t == 0:
+        return False
+    
+    # 计算u1*G + u2*Q
+    u1 = (s * t) % n
+    u2 = (r * t) % n
+    u1G = point_mul(u1, G)
+    u2Q = point_mul(u2, Q)
+    P = point_add(u1G, u2Q)
+    
+    if P.is_inf:
+        return False
+    
+    # 验证签名
+    return (r + P.x) % n == r
+
+
+# ----------------------------
+# 加密与解密
+# ----------------------------
+def encrypt(Q: Point, message: bytes) -> bytes:
+    """SM2公钥加密：使用公钥Q加密消息"""
+    while True:
+        # 生成随机数k (1 < k < n)
+        while True:
+            k = int.from_bytes(os.urandom(32), byteorder='big')
+            if 1 < k < n:
+                break
+        
+        kG = point_mul(k, G)  # k*G = (x1, y1)
+        kQ = point_mul(k, Q)  # k*Q = (x2, y2)
+        
+        # 计算t = SM3(x2 || y2)，t不能全为0
+        x2_bytes = kQ.x.to_bytes(32, byteorder='big')
+        y2_bytes = kQ.y.to_bytes(32, byteorder='big')
+        t = sm3_hash(x2_bytes + y2_bytes)
+        
+        if any(b != 0 for b in t):
+            break
+    
+    # 计算密文：c1(x1||y1) + c2(m^t)
+    c1 = kG.x.to_bytes(32, byteorder='big') + kG.y.to_bytes(32, byteorder='big')
+    c2 = bytes(m ^ t[i % len(t)] for i, m in enumerate(message))
+    return c1 + c2
+
+
+def decrypt(d: int, ciphertext: bytes) -> Optional[bytes]:
+    """SM2私钥解密：使用私钥d解密密文"""
+    # 解析密文格式
+    if len(ciphertext) < 64:
+        return None  # 密文长度不足
+    c1_bytes = ciphertext[:64]
+    c2 = ciphertext[64:]
+    
+    # 解析C1点
+    x1 = int.from_bytes(c1_bytes[:32], byteorder='big')
+    y1 = int.from_bytes(c1_bytes[32:], byteorder='big')
+    C1 = Point(x1, y1)
+    
+    # 验证C1是否在椭圆曲线上
+    if (y1 * y1 - (x1 **3 + a * x1 + b)) % p != 0:
+        return None
+    
+    # 计算d*C1 = (x2, y2)
+    dC1 = point_mul(d, C1)
+    x2_bytes = dC1.x.to_bytes(32, byteorder='big')
+    y2_bytes = dC1.y.to_bytes(32, byteorder='big')
+    t = sm3_hash(x2_bytes + y2_bytes)
+    
+    if all(b == 0 for b in t):
+        return None
+    
+    # 解密消息
+    return bytes(c ^ t[i % len(t)] for i, c in enumerate(c2))
+
+
+# ----------------------------
+# 测试代码
+# ----------------------------
+if __name__ == "__main__":
+    print("=== SM2算法测试 ===")
+    
+    # 1. 生成密钥对
+    d, Q = generate_key_pair()
+    print(f"私钥d: 0x{d:064x}")
+    print(f"公钥Q: {Q}")
+    
+    # 2. 测试签名与验证
+    message = b"Hello, SM2!"
+    print(f"\n原始消息: {message.decode()}")
+    
+    signature = sign(d, message)
+    print(f"签名结果: (r=0x{signature[0]:064x}, s=0x{signature[1]:064x})")
+    
+    verify_result = verify(Q, message, signature)
+    print(f"签名验证: {'成功' if verify_result else '失败'}")
+    
+    # 3. 测试加密与解密
+    ciphertext = encrypt(Q, message)
+    print(f"\n加密密文: 0x{ciphertext.hex()}")
+    
+    plaintext = decrypt(d, ciphertext)
+    print(f"解密结果: {plaintext.decode() if plaintext else '解密失败'}")
+    print(f"解密验证: {'成功' if plaintext == message else '失败'}")
